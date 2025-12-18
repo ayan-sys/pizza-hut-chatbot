@@ -2,319 +2,273 @@ import streamlit as st
 import os
 import requests
 import json
-import base64
+import pandas as pd
+from database import init_db, get_menu, create_order, get_orders, update_order_status, get_orders_by_name
 
-# --- Configuration & Theme ---
-st.set_page_config(layout="wide", page_title="Pizza Hut Chatbot", page_icon="🍕")
+# --- Init DB ---
+if "db_initialized" not in st.session_state:
+    init_db()
+    st.session_state.db_initialized = True
 
-# Heuristic for detecting local assets path
+# --- Configuration ---
+st.set_page_config(layout="wide", page_title="Pizza Hut System", page_icon="🍕")
 ASSETS_DIR = os.path.join(os.getcwd(), 'src', 'assets')
 
 def get_image_path(filename):
     return os.path.join(ASSETS_DIR, filename)
 
-# Assets Map
-MENU_ITEMS = {
-    'large pizza': {'image': 'large_pizza.png', 'price': 1500, 'name': 'Large Pizza', 'tags': ['large', 'pizza']},
-    'medium pizza': {'image': 'medium_pizza.png', 'price': 1000, 'name': 'Medium Pizza', 'tags': ['medium', 'pizza']},
-    'small pizza': {'image': 'small_pizza.png', 'price': 500, 'name': 'Small Pizza', 'tags': ['small', 'pizza']},
-    'zinger burger': {'image': 'zinger_burger.png', 'price': 600, 'name': 'Zinger Burger', 'tags': ['zinger', 'burger', 'crispy']},
-    'normal chicken burger': {'image': 'normal_chicken_burger.png', 'price': 250, 'name': 'Chicken Burger', 'tags': ['chicken', 'burger', 'classic', 'normal']},
-    'special chicken burger': {'image': 'special_chicken_burger.png', 'price': 380, 'name': 'Special Burger', 'tags': ['special', 'burger']},
-    'cola': {'image': 'cola_drink.png', 'price': 80, 'name': 'Cola Next', 'tags': ['cola', 'drink', 'soda', 'next']},
-    'fizzup': {'image': 'cola_drink.png', 'price': 80, 'name': 'FizzUp', 'tags': ['fizzup', 'drink']},
+# Load Menu from DB
+db_menu = get_menu()
+# Create a fallback/lookup dict for fuzzy matching
+MENU_ITEMS = {item['name'].lower(): item for item in db_menu}
+
+# --- Shared Helpers ---
+TRANSLATIONS = {
+    "English": {
+        "chat_header": "Customer Chat",
+        "welcome": "Welcome! 🍕 Check menu, order food, or track your order!",
+        "ask_placeholder": "Ask for pizza, or say 'Track Order <your name>'...",
+        "track_hint": "To track, please type: 'Track Order [Your Name]'",
+        "cancel_hint": "To cancel an order, please provide your Order ID. OR contact support.",
+        "menu_header": "**Menu:**\n",
+        "cart_check": "Please check your Cart on the right to place the order! 👉",
+        "general_help": "I can help you Order, Track Status, or Browse Menu. What would you like?",
+        "live_pic": "Live Picture 📸",
+        "add_btn": "Add",
+        "cart_header": "Your Cart 🛒",
+        "clear_cart": "Clear Cart",
+        "checkout_header": "Checkout Details",
+        "place_order": "Place Order ✅",
+        "name_lbl": "Full Name",
+        "addr_lbl": "Delivery Address",
+        "pay_lbl": "Payment Method",
+        "empty_cart": "Cart is empty.",
+        "success_order": "Order Placed! 🎉",
+        "track_info": "You can track it by typing 'Track Order <Name>'"
+    },
+    "Urdu": {
+        "chat_header": "کسٹمر چیٹ",
+        "welcome": "خوش آمدید! 🍕 مینو چیک کریں، کھانا آرڈر کریں، یا اپنا آرڈر ٹریک کریں!",
+        "ask_placeholder": "پیزا مانگیں، یا کہیں 'ٹریک آرڈر <نام>'...",
+        "track_hint": "ٹریک کرنے کے لیے لکھیں: 'Track Order [اپنا نام]'",
+        "cancel_hint": "آرڈر منسوخ کرنے کے لیے آرڈر آئی ڈی فراہم کریں۔ یا سپورٹ سے رابطہ کریں۔",
+        "menu_header": "**مینو:**\n",
+        "cart_check": "براہ کرم آرڈر کرنے کے لیے دائیں طرف اپنی ٹوکری چیک کریں! 👉",
+        "general_help": "میں آرڈر، ٹریکنگ یا مینو میں مدد کر سکتا ہوں۔ آپ کیا پسند کریں گے؟",
+        "live_pic": "لائیو تصویر 📸",
+        "add_btn": "شامل کریں",
+        "cart_header": "آپ کی ٹوکری 🛒",
+        "clear_cart": "ٹوکری خالی کریں",
+        "checkout_header": "چیک آؤٹ کی تفصیلات",
+        "place_order": "آرڈر کریں ✅",
+        "name_lbl": "پورا نام",
+        "addr_lbl": "پتہ",
+        "pay_lbl": "ادائیگی کا طریقہ",
+        "empty_cart": "ٹوکری خالی ہے۔",
+        "success_order": "آرڈر کر دیا گیا! 🎉",
+        "track_info": "آپ 'Track Order <نام>' لکھ کر ٹریک کر سکتے ہیں"
+    }
+    # Add other languages as needed or fallback to English
 }
 
-# --- Helper: Fuzzy Match ---
+def t(key, lang):
+    # Fallback to English if key/lang missing
+    return TRANSLATIONS.get(lang, TRANSLATIONS["English"]).get(key, TRANSLATIONS["English"][key])
+
 def find_menu_item(text):
     text = text.lower()
     best_match = None
     max_score = 0
-    
-    # Simple scoring: count how many tags appear in the text
-    for key, item in MENU_ITEMS.items():
+    for item in db_menu:
         score = 0
         for tag in item['tags']:
-            if tag in text:
-                score += 1
+            if tag in text: score += 1
+        if item['name'].lower() in text: score += 3
         
-        # Boost for exact name match
-        if key in text:
-            score += 2
-            
         if score > max_score and score > 0:
             max_score = score
             best_match = item
-            
-    # Threshold: meaningful match needs at least 1 tag or partial name
-    if max_score >= 1:
-        # Avoid generic "burger" matching "zinger burger" if user just said "burger"
-        # If user said ONLY "burger", score might be 1 (tag 'burger'), but we might want generic response
-        # Heuristic: If text length is short and score is low, treat as generic?
-        # For now, let's trust the score but prioritize full item names
-        return best_match
+    if max_score >= 1: return best_match
     return None
 
-# --- Helper: Hugging Face Conversational API ---
-def get_ai_response(user_input, context=""):
-    API_URL = "https://api-inference.huggingface.co/models/google/flan-t5-large"
-    # Note: This is a public endpoint, might be rate limited. 
-    # Using a free model that supports some instruction following.
-    
-    headers = {"Authorization": "Bearer hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"} # Replace with real token if available, else standard public access might limit
-    
-    # Construct a prompt for the "Waiter Persona"
-    prompt = f"""
-You are a friendly, multilingual waiter at Pizza Hut. 
-The menu has: Large Pizza (1500), Medium (1000), Small (500), Zinger Burger (600), Chicken Burger (250), Special Burger (380), Drinks (80).
-Your task: Reply to the customer in the SAME LANGUAGE they used. Be helpful and polite.
+def get_orders_df():
+    orders = get_orders()
+    if not orders: return pd.DataFrame()
+    df = pd.DataFrame(orders, columns=['ID', 'Name', 'Address', 'Items', 'Total', 'Status', 'Payment', 'Time'])
+    return df
 
-Customer: {user_input}
-Waiter:"""
-
-    payload = {
-        "inputs": prompt,
-        "parameters": {"max_new_tokens": 100, "temperature": 0.7}
-    }
-
-    try:
-        response = requests.post(API_URL, json=payload)
-        if response.status_code == 200:
-            return response.json()[0]['generated_text']
-        else:
-            return None
-    except:
-        return None
-
-# --- Sidebar: Theme & Language Customizer ---
+# --- SIDEBAR NAV ---
 st.sidebar.image(get_image_path("pizza_hut_chatbot_logo.png"), use_column_width=True)
-st.sidebar.title("Settings ⚙️")
+app_mode = st.sidebar.radio("Navigation 🧭", ["Chatbot 🤖", "Dashboard 📊"])
 
-# Language Selector
-selected_language = st.sidebar.selectbox(
-    "Choose Language 🌍",
-    ["English", "Urdu", "Spanish", "French", "Arabic", "Chinese", "Hindi", "Russian", "Portuguese", "Japanese"]
-)
-
-st.sidebar.markdown("---")
-st.sidebar.title("Theme 🎨")
-primary_color = st.sidebar.color_picker("Primary Color", "#e11d48")
-secondary_color = st.sidebar.color_picker("Accent Color", "#fbbf24")
-
-# Inject Custom CSS
-st.markdown(f"""
-    <style>
-    .stApp {{
-        --primary-color: {primary_color};
-        --secondary-color: {secondary_color};
-    }}
-    .stChatInput button {{
-        background-color: {primary_color} !important;
-        color: white !important;
-    }}
-    .user-message {{
-        background-color: {primary_color};
-        color: white;
-        padding: 10px;
-        border-radius: 10px;
-        margin-bottom: 10px;
-        text-align: right;
-    }}
-    </style>
-""", unsafe_allow_html=True)
-
-# --- Helper: Hugging Face Conversational API ---
-def get_ai_response(user_input, context="", language="English"):
-    API_URL = "https://api-inference.huggingface.co/models/google/flan-t5-large"
-    headers = {"Authorization": "Bearer hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"} 
+# ==========================================
+# PAGE 1: CHATBOT
+# ==========================================
+if app_mode == "Chatbot 🤖":
+    st.sidebar.markdown("---")
+    st.sidebar.title("Settings ⚙️")
+    selected_language = st.sidebar.selectbox("Language 🌍", ["English", "Urdu", "Spanish", "Arabic"])
     
-    # Prompt Engineering for Language + Persona
-    prompt = f"""
-You are a friendly waiter at Pizza Hut. 
-Language: {language}
-Menu: Large Pizza (1500), Medium (1000), Small (500), Zinger Burger (600), Chicken Burger (250), Drinks (80).
-Task: Reply to the customer in {language}. Keep it short and helpful.
+    # State
+    if "messages" not in st.session_state:
+        st.session_state.messages = [{"role": "assistant", "content": t("welcome", selected_language)}]
+    if "current_image" not in st.session_state:
+        st.session_state.current_image = None
+    if "cart" not in st.session_state:
+        st.session_state.cart = []
 
-Customer: {user_input}
-Waiter:"""
+    col1, col2 = st.columns([2, 1])
 
-    payload = {"inputs": prompt, "parameters": {"max_new_tokens": 128, "temperature": 0.7}}
-
-    try:
-        response = requests.post(API_URL, json=payload)
-        if response.status_code == 200:
-            return response.json()[0]['generated_text']
-    except:
-        pass
-    return None
-
-# --- Helper: Translate Static Text ---
-def translate_text(text, target_lang):
-    if target_lang == "English":
-        return text
-    
-    # Use the same AI model to "translate" or "rewrite" the static info
-    API_URL = "https://api-inference.huggingface.co/models/google/flan-t5-large"
-    prompt = f"Translate this to {target_lang}:\n\n{text}"
-    
-    payload = {"inputs": prompt, "parameters": {"max_new_tokens": 128}}
-    try:
-        response = requests.post(API_URL, json=payload)
-        if response.status_code == 200:
-            return response.json()[0]['generated_text']
-    except:
-        pass
-    return text  # Fallback to English
-
-# --- State Management ---
-if "messages" not in st.session_state:
-    st.session_state.messages = [{"role": "assistant", "content": "Welcome to Pizza Hut! 🍕 Please choose your language from the sidebar."}]
-if "current_image" not in st.session_state:
-    st.session_state.current_image = None
-if "cart" not in st.session_state:
-    st.session_state.cart = []
-
-def add_to_cart(item):
-    st.session_state.cart.append(item)
-    st.toast(f"Added {item['name']} to cart! 🛒")
-
-def calculate_total():
-    return sum(item['price'] for item in st.session_state.cart)
-
-# --- Main Layout ---
-col1, col2 = st.columns([2, 1])
-
-with col1:
-    st.header(f"Chat 💬 ({selected_language})")
-    
-    for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            st.write(msg["content"])
-
-    if prompt := st.chat_input("Ask for a pizza..."):
-        # 1. User Message
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.write(prompt)
-
-        # 2. Logic: Item Detection
-        lower_text = prompt.lower()
-        found_item = find_menu_item(lower_text)
+    with col1:
+        st.header(f"{t('chat_header', selected_language)} ({selected_language})")
         
-        response_text = ""
-        
-        # Update Image
-        if found_item:
-            st.session_state.current_image = found_item
-        elif "burger" in lower_text:
-             st.session_state.current_image = MENU_ITEMS['zinger burger']
-        elif "pizza" in lower_text:
-             st.session_state.current_image = MENU_ITEMS['large pizza']
+        for msg in st.session_state.messages:
+            with st.chat_message(msg["role"]):
+                st.write(msg["content"])
 
-        # 3. Handle Intents with Language Support
-        
-        # Payment Intent
-        if any(w in lower_text for w in ['pay', 'bill', 'checkout', 'jazzcash', 'money']):
-            base_msg = "Please check your Cart on the right side to complete your order! 👉"
-            response_text = translate_text(base_msg, selected_language)
-            
-        # Specific Item
-        elif found_item:
-            base_msg = f"Here is your {found_item['name']} ({found_item['price']} PKR). You can add it to your cart on the right! 👉"
-            response_text = translate_text(base_msg, selected_language)
-            
-        # Menu Intent
-        elif any(w in lower_text for w in ['menu', 'list', 'show']):
-            base_msg = "Menu: Pizzas (500-1500), Burgers (250-600), Drinks (80). What would you like?"
-            response_text = translate_text(base_msg, selected_language)
-            
-        # General AI Chat
-        else:
-            ai_reply = get_ai_response(prompt, language=selected_language)
-            if ai_reply:
-                response_text = ai_reply
-            else:
-                response_text = translate_text("I am ready to take your order! Please ask for a pizza or burger.", selected_language)
+        if prompt := st.chat_input(t("ask_placeholder", selected_language)):
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            with st.chat_message("user"): st.write(prompt)
 
-        # Add Assistant Message
-        st.session_state.messages.append({"role": "assistant", "content": response_text})
-        with st.chat_message("assistant"):
-            st.write(response_text)
-
-with col2:
-    # --- Live Picture Section ---
-    st.subheader("Live Picture 📸")
-    current = st.session_state.current_image
-    
-    if current:
-        try:
-            image_path = get_image_path(current['image'])
-            st.image(image_path, caption=f"{current['name']} - {current['price']} PKR", use_column_width=True)
+            lower_text = prompt.lower()
+            response_text = ""
             
-            # Add to Cart Button
-            if st.button(f"Add {current['name']} to Cart 🛒", key="add_btn", use_container_width=True):
-                add_to_cart(current)
-                
-        except Exception as e:
-            st.error(f"Image not found")
-    else:
-        st.info("Ask for an item to see it here!")
-        st.markdown("# 🍕")
-
-    st.markdown("---")
-
-    # --- Cart & Checkout Section ---
-    st.subheader("Your Order 🛒")
-    
-    if not st.session_state.cart:
-        st.write("Your cart is empty.")
-    else:
-        # Display Cart Items
-        for i, item in enumerate(st.session_state.cart):
-            st.text(f"{i+1}. {item['name']} - {item['price']} PKR")
-        
-        total = calculate_total()
-        st.markdown(f"**Total: {total} PKR**")
-        
-        if st.button("Clear Cart", use_container_width=True):
-            st.session_state.cart = []
-            st.rerun()
-
-        st.markdown("### Checkout 📝")
-        with st.form("checkout_form"):
-            name = st.text_input("Name")
-            address = st.text_area("Delivery Address")
-            payment_method = st.selectbox("Payment Method", ["Cash on Delivery", "JazzCash (03091331142)", "GPay"])
-            
-            submitted = st.form_submit_button("Place Order ✅", use_container_width=True)
-            
-            if submitted:
-                if name and address:
-                    st.success("Order Placed Successfully! 🎉")
-                    st.balloons()
-                    
-                    # Generate Receipt
-                    receipt = f"""
-                    **🧾 PIZZA HUT RECEIPT**
-                    --------------------------------
-                    **Customer:** {name}
-                    **Address:** {address}
-                    **Payment:** {payment_method}
-                    --------------------------------
-                    **Items:**
-                    """
-                    for item in st.session_state.cart:
-                        receipt += f"- {item['name']}: {item['price']} PKR\n"
-                    
-                    receipt += f"""
-                    --------------------------------
-                    **TOTAL AMOUNT: {total} PKR**
-                    --------------------------------
-                    Thnk you for ordering! 🍕
-                    """
-                    st.markdown(receipt)
-                    
-                    # Reset Cart
-                    st.session_state.cart = []
+            # 1. TRACK ORDER Intent
+            if "track" in lower_text or "status" in lower_text:
+                name_query = prompt.replace("track", "").replace("order", "").strip()
+                if len(name_query) > 2:
+                    orders = get_orders_by_name(name_query)
+                    if orders:
+                        last_order = orders[0]
+                        response_text = f"Found your order #{last_order[0]}! \n**Status:** {last_order[5]} 🕒\nTotal: {last_order[4]} PKR\nItems: {last_order[3]}"
+                    else:
+                        response_text = f"No order found for '{name_query}'."
                 else:
-                    st.error("Please fill in your Name and Address.")
+                    response_text = t("track_hint", selected_language)
+            
+            # 2. CANCEL ORDER Intent
+            elif "cancel" in lower_text:
+                 response_text = t("cancel_hint", selected_language)
+
+            # 3. MENU / ORDER Intent
+            else:
+                found_item = find_menu_item(lower_text)
+                if found_item:
+                    st.session_state.current_image = found_item
+                    response_text = f"**{found_item['name']}** ({found_item['price']} PKR). {t('add_btn', selected_language)}? 👉"
+                elif "menu" in lower_text:
+                    response_text = t("menu_header", selected_language) + "\n".join([f"- {m['name']} ({m['price']} PKR)" for m in db_menu])
+                elif "pay" in lower_text or "checkout" in lower_text:
+                    response_text = t("cart_check", selected_language)
+                else:
+                     # Fallback / General
+                     response_text = t("general_help", selected_language)
+
+            st.session_state.messages.append({"role": "assistant", "content": response_text})
+            with st.chat_message("assistant"): st.write(response_text)
+
+    with col2:
+        st.subheader(t("live_pic", selected_language))
+        curr = st.session_state.current_image
+        if curr:
+            st.image(get_image_path(curr['image']), caption=curr['name'])
+            if st.button(f"{t('add_btn', selected_language)} {curr['name']} ➕", key="add"):
+                st.session_state.cart.append(curr)
+                st.toast("Added!")
+        else:
+            st.info("Choose food to see here!")
+
+        st.markdown("---")
+        st.subheader(t("cart_header", selected_language))
+        if st.session_state.cart:
+            total = 0
+            for i, it in enumerate(st.session_state.cart):
+                st.text(f"{i+1}. {it['name']} ({it['price']})")
+                total += it['price']
+            
+            st.markdown(f"**Total: {total} PKR**")
+            
+            if st.button(t("clear_cart", selected_language)): 
+                st.session_state.cart = []
+                st.rerun()
+            
+            with st.form("checkout"):
+                st.markdown(f"### {t('checkout_header', selected_language)}")
+                name = st.text_input(t("name_lbl", selected_language))
+                addr = st.text_input(t("addr_lbl", selected_language))
+                pay = st.selectbox(t("pay_lbl", selected_language), ["Cash on Delivery", "JazzCash (03091331142)", "GPay"])
+                
+                if st.form_submit_button(t("place_order", selected_language), use_container_width=True):
+                    if name and addr:
+                        items_summary = ", ".join([i['name'] for i in st.session_state.cart])
+                        oid = create_order(name, addr, items_summary, total, pay)
+                        
+                        st.balloons()
+                        st.success(f"{t('success_order', selected_language)} (ID: {oid})")
+                        st.info(f"{t('track_info', selected_language).replace('<Name>', name)}")
+                        st.session_state.cart = []
+                    else:
+                        st.error("Name and Address required")
+        else:
+            st.write(t("empty_cart", selected_language))
+
+# ==========================================
+# PAGE 2: DASHBOARD
+# ==========================================
+elif app_mode == "Dashboard 📊":
+    st.title("Restaurant Admin Dashboard 📈")
+    # ... (Dashboard logic remains mostly the same, usually admin is English)
+    # ... But let's leave the rest of the file intact by ending edit here 
+    # and relying on existing code for dashboard
+    
+    st.markdown("Manage orders, view sales, and analytics.")
+    
+    df = get_orders_df()
+    
+    if df.empty:
+        st.info("No orders yet. Go to Chatbot and place some!")
+    else:
+        # Metrics
+        total_sales = df['Total'].sum()
+        total_orders = len(df)
+        pending_orders = len(df[df['Status'] == 'Pending'])
+        
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Total Revenue", f"{total_sales} PKR", delta="Today")
+        m2.metric("Total Orders", total_orders)
+        m3.metric("Pending Orders", pending_orders, delta_color="inverse")
+        
+        st.divider()
+        
+        c1, c2 = st.columns([2, 1])
+        
+        with c1:
+            st.subheader("Sales by Status")
+            status_counts = df['Status'].value_counts()
+            st.bar_chart(status_counts)
+            
+        with c2:
+            st.subheader("Recent Activity")
+            st.dataframe(df[['Name', 'Total', 'Status']].head(5), hide_index=True)
+
+        st.divider()
+        st.subheader("Order Management")
+        
+        # Display as editable table or list
+        for index, row in df.iterrows():
+            with st.expander(f"Order #{row['ID']} - {row['Name']} ({row['Total']} PKR)"):
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    st.write(f"**Items:** {row['Items']}")
+                    st.write(f"**Address:** {row['Address']}")
+                    st.write(f"**Payment:** {row['Payment']}")
+                with col_b:
+                    st.write(f"**Current Status:** {row['Status']}")
+                    st.write(f"**Time:** {row['Time']}")
+                    
+                    # Update Status
+                    new_status = st.selectbox("Update Status", ["Pending", "Cooking", "Delivered", "Cancelled"], key=f"status_{row['ID']}", index=["Pending", "Cooking", "Delivered", "Cancelled"].index(row['Status']) if row['Status'] in ["Pending", "Cooking", "Delivered", "Cancelled"] else 0)
+                    if st.button(f"Update Order #{row['ID']}", key=f"btn_{row['ID']}"):
+                        update_order_status(row['ID'], new_status)
+                        st.success("Updated!")
+                        st.rerun()
