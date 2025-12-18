@@ -171,6 +171,15 @@ if "messages" not in st.session_state:
     st.session_state.messages = [{"role": "assistant", "content": "Welcome to Pizza Hut! 🍕 Please choose your language from the sidebar."}]
 if "current_image" not in st.session_state:
     st.session_state.current_image = None
+if "cart" not in st.session_state:
+    st.session_state.cart = []
+
+def add_to_cart(item):
+    st.session_state.cart.append(item)
+    st.toast(f"Added {item['name']} to cart! 🛒")
+
+def calculate_total():
+    return sum(item['price'] for item in st.session_state.cart)
 
 # --- Main Layout ---
 col1, col2 = st.columns([2, 1])
@@ -206,12 +215,12 @@ with col1:
         
         # Payment Intent
         if any(w in lower_text for w in ['pay', 'bill', 'checkout', 'jazzcash', 'money']):
-            base_msg = "You can pay via JazzCash (03091331142) or GPay. Please upload a screenshot!"
+            base_msg = "Please check your Cart on the right side to complete your order! 👉"
             response_text = translate_text(base_msg, selected_language)
             
         # Specific Item
         elif found_item:
-            base_msg = f"Here is your {found_item['name']} ({found_item['price']} PKR). Would you like to check out?"
+            base_msg = f"Here is your {found_item['name']} ({found_item['price']} PKR). You can add it to your cart on the right! 👉"
             response_text = translate_text(base_msg, selected_language)
             
         # Menu Intent
@@ -233,15 +242,79 @@ with col1:
             st.write(response_text)
 
 with col2:
-    st.header("Live Picture 📸")
+    # --- Live Picture Section ---
+    st.subheader("Live Picture 📸")
     current = st.session_state.current_image
     
     if current:
         try:
             image_path = get_image_path(current['image'])
             st.image(image_path, caption=f"{current['name']} - {current['price']} PKR", use_column_width=True)
+            
+            # Add to Cart Button
+            if st.button(f"Add {current['name']} to Cart 🛒", key="add_btn", use_container_width=True):
+                add_to_cart(current)
+                
         except Exception as e:
             st.error(f"Image not found")
     else:
-        st.info("Your food will appear here!")
+        st.info("Ask for an item to see it here!")
         st.markdown("# 🍕")
+
+    st.markdown("---")
+
+    # --- Cart & Checkout Section ---
+    st.subheader("Your Order 🛒")
+    
+    if not st.session_state.cart:
+        st.write("Your cart is empty.")
+    else:
+        # Display Cart Items
+        for i, item in enumerate(st.session_state.cart):
+            st.text(f"{i+1}. {item['name']} - {item['price']} PKR")
+        
+        total = calculate_total()
+        st.markdown(f"**Total: {total} PKR**")
+        
+        if st.button("Clear Cart", use_container_width=True):
+            st.session_state.cart = []
+            st.rerun()
+
+        st.markdown("### Checkout 📝")
+        with st.form("checkout_form"):
+            name = st.text_input("Name")
+            address = st.text_area("Delivery Address")
+            payment_method = st.selectbox("Payment Method", ["Cash on Delivery", "JazzCash (03091331142)", "GPay"])
+            
+            submitted = st.form_submit_button("Place Order ✅", use_container_width=True)
+            
+            if submitted:
+                if name and address:
+                    st.success("Order Placed Successfully! 🎉")
+                    st.balloons()
+                    
+                    # Generate Receipt
+                    receipt = f"""
+                    **🧾 PIZZA HUT RECEIPT**
+                    --------------------------------
+                    **Customer:** {name}
+                    **Address:** {address}
+                    **Payment:** {payment_method}
+                    --------------------------------
+                    **Items:**
+                    """
+                    for item in st.session_state.cart:
+                        receipt += f"- {item['name']}: {item['price']} PKR\n"
+                    
+                    receipt += f"""
+                    --------------------------------
+                    **TOTAL AMOUNT: {total} PKR**
+                    --------------------------------
+                    Thnk you for ordering! 🍕
+                    """
+                    st.markdown(receipt)
+                    
+                    # Reset Cart
+                    st.session_state.cart = []
+                else:
+                    st.error("Please fill in your Name and Address.")
